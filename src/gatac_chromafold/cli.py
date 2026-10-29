@@ -28,6 +28,25 @@ def register(subparsers) -> None:
                                         "(default: compute ChromaFold's iterative LSI)")
     prep.set_defaults(func=_prepare)
 
+    pred = sub.add_parser(
+        "predict",
+        help="Predict contact maps from a ChromaFold data directory",
+        description="Run ChromaFold's published model on the inputs of DATA (written by "
+                    "`gatac chromafold prepare` or ChromaFold's preprocessing), and write per "
+                    "chromosome OUTPUT/prediction_{cell_type}_{chrom}.npz: `stripes` (windows x "
+                    "400 contacts) and `centers` (each window's centre 10 kb bin).",
+    )
+    pred.add_argument("data", help="ChromaFold data directory")
+    pred.add_argument("-c", "--cell-type", required=True, help="Cell type name, ChromaFold's -ct")
+    pred.add_argument("-o", "--output", required=True, help="Output directory")
+    pred.add_argument("-g", "--genome", default="hg38", help="hg38, hg19 or mm10 (default: hg38)")
+    pred.add_argument("--chroms", nargs="+", help="Chromosomes, e.g. chr19 chr20 (default: all)")
+    pred.add_argument("--model", default="CTCFmotif", help="CTCFmotif (default), CTCFChIP, or a checkpoint path")
+    pred.add_argument("--offset", type=int, default=-2_000_000,
+                      help="First window start; -2000000 (default) predicts from the chromosome start")
+    pred.add_argument("--batch-size", type=int, default=64)
+    pred.set_defaults(func=_predict)
+
 
 def _prepare(args) -> None:
     import anndata as ad
@@ -43,3 +62,24 @@ def _prepare(args) -> None:
         logging.error(str(e))
         sys.exit(1)
     logging.info(f"{inputs}; wrote {', '.join(str(p) for p in paths.values())}")
+
+
+def _predict(args) -> None:
+    import os
+
+    import numpy as np
+
+    from .predict import predict
+
+    try:
+        pred = predict(data_path=args.data, cell_type=args.cell_type, genome=args.genome,
+                       chroms=args.chroms, model=args.model, offset=args.offset,
+                       batch_size=args.batch_size)
+    except (ValueError, KeyError, FileNotFoundError) as e:
+        logging.error(str(e))
+        sys.exit(1)
+    os.makedirs(args.output, exist_ok=True)
+    for c in pred.stripes:
+        np.savez_compressed(os.path.join(args.output, f"prediction_{args.cell_type}_{c}.npz"),
+                            stripes=pred.stripes[c], centers=pred.centers[c])
+    logging.info(f"{pred}; wrote {args.output}")

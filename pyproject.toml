@@ -10,6 +10,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# running the model: predict()
+model = [
+    "torch>=2.4",
+    "gdown>=5",  # ChromaFold's CTCF motif tracks are on Google Drive
+]
 cuda12 = ["gatac[cuda12]"]
 cuda13 = ["gatac[cuda13]"]
 

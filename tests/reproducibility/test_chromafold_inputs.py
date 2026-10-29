@@ -31,6 +31,12 @@ replaced by in-memory inputs and outputs. Step 4 of ``atac_processing``
 (per-cell 50 bp tiles) is left out: it only serves ChromaFold's training,
 which samples cells; inference uses the track of all cells.
 
+It then predicts chr19 with the published model three ways: ChromaFold's
+inference code (``inference.py``'s ``main``, ``test_Dataset`` and ``test``,
+copied below) on ChromaFold's preprocessing; ``gatac_chromafold.predict`` on
+the same preprocessing, read from ChromaFold's file layout, which must give
+the same predictions; and ``predict`` on GATAC's inputs, end to end.
+
 ChromaFold puts a fragment's second insertion at ``end``, GATAC (and SnapATAC2)
 at ``end - 1``, the last base of the fragment. The two differ only for the
 fragments with ``end`` a multiple of the tile size, whose insertion ChromaFold
@@ -53,6 +59,8 @@ import urllib.request
 
 import anndata as ad
 import pytest
+import torch
+import torch.nn as nn
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
@@ -65,6 +73,7 @@ from gatac.io.fragments import FragmentFile
 
 CHROMAFOLD_COMMIT = "1c5dd9b07d851d196c31c26024d90c0335f1bd75"
 VALID_CHROM = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
+PREDICT_CHROM = "chr19"
 SAMPLE = "pbmc5k"
 
 # The SnapATAC2 copies of the 10x PBMC 5k fragments and of GENCODE v41
@@ -167,6 +176,216 @@ def get_metacell_profile(sc_atac_dict, nbrs):
         )
 
     return metacell_sc_atac_dict
+
+
+# chromafold/utils.py, testing.py and inference.py, for the predictions
+
+def normalize(tensor, effective_genome_size=0, libsize=0, training=False):
+    tensor = torch.tensor(tensor)
+    if training:
+        assert libsize != 0, "Libsize cannot be 0 during training."
+        scale_factor = (libsize * 150) / effective_genome_size
+        tensor.div_(torch.as_tensor(scale_factor))
+    tensor = torch.log(tensor + 1)
+    return tensor
+
+
+def normalize_bulk_dict(pbulk_dict, effective_genome_size):
+    from scipy import sparse
+    normalized_pbulk_dict = {}
+    libsize = 0
+    for chrom in pbulk_dict.keys():
+        libsize += pbulk_dict[chrom].toarray().sum()
+    scale_factor = (libsize * 150) / (effective_genome_size)
+    for chrom in pbulk_dict.keys():
+        y = pbulk_dict[chrom].toarray()
+        y_t = y / scale_factor
+        normalized_pbulk_dict[chrom] = sparse.csr_matrix(y_t)
+    return normalized_pbulk_dict
+
+
+def cpu_jaccard_vstripe(x):
+    # calculate jaccard similarity of rows
+    scatac_res = 500
+    size = x.shape[1]
+    eps = 1e-8
+    i = np.int16(1000 / scatac_res)
+
+    x = torch.where(x > 0.0, torch.tensor([1.0]), torch.tensor([0.0]))
+    num = torch.mm(
+        x[2000 * i : 2010 * i, :],
+        x[np.r_[:, 0 : 2000 * i, 2010 * i : 4010 * i]].transpose(0, 1),
+    )
+
+    x = torch.where(x == 0.0, torch.tensor([1.0]), torch.tensor([0.0]))
+    denom = torch.mm(
+        x[2000 * i : 2010 * i, :],
+        x[np.r_[:, 0 : 2000 * i, 2010 * i : 4010 * i]].transpose(0, 1),
+    )
+    denom = size - denom
+
+    num = torch.div(num, torch.max(denom, eps * torch.ones_like(denom)))
+
+    return num
+
+
+def cpu_batch_corcoeff_vstripe(x):
+    c = cpu_jaccard_vstripe(x.permute(1, 0))
+    c[c != c] = 0
+    return c
+
+
+def get_starts(chrom_list, start_dict, end_dict, chrom_start_offset, chrom_end_offset,
+               multi_ct=False, ct_list=[], step=5e4):
+    ctl = []
+    startl = []
+    chroml = []
+    for chrom in chrom_list:
+        chrom = "chr{}".format(chrom)
+        cur_starts = list(
+            np.arange(
+                start_dict[chrom] + chrom_start_offset,
+                end_dict[chrom] - chrom_end_offset,
+                step,
+            ).astype(int)
+        )
+        startl = startl + cur_starts
+        chroml = chroml + list(np.repeat(chrom, len(cur_starts)))
+    return ctl, startl, chroml
+
+
+class test_Dataset(torch.utils.data.Dataset):
+    def __init__(self, input_size, pbulk_dict, scatac_dict, ctcf_dict, list_cts, list_starts,
+                 list_chroms, transform, is_training=False):
+        self.input_size = input_size
+        self.pbulk_dict = pbulk_dict
+        self.scatac_dict = scatac_dict
+        self.ctcf_dict = ctcf_dict
+        self.list_cts = list_cts
+        self.list_starts = list_starts
+        self.list_chroms = list_chroms
+        self.is_training = is_training
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.list_starts)
+
+    def __getitem__(self, index):
+        chrom = self.list_chroms[index]
+        start = self.list_starts[index]
+
+        shift_input_by = 0
+        pbulk_res = 50
+        scatac_res = 500
+
+        input_window = int(self.input_size / pbulk_res)
+        atac_start_ind = int(start / pbulk_res)
+        sc_input_window = int(self.input_size / scatac_res)
+        sc_atac_start_ind = int(start / scatac_res)
+
+        X1 = self.pbulk_dict[chrom]
+        X1 = X1[
+            max(0, atac_start_ind + shift_input_by) : atac_start_ind
+            + shift_input_by
+            + input_window
+        ]
+        X1 = self.transform(X1.toarray().astype(np.float32).T)
+
+        Z1 = self.scatac_dict[chrom]
+        Z1 = Z1[
+            max(0, sc_atac_start_ind + shift_input_by) : sc_atac_start_ind
+            + shift_input_by
+            + sc_input_window,
+            :,
+        ]
+
+        Z1 = Z1.toarray().astype(np.float32).T
+        Z1 = torch.tensor(Z1)
+
+        X2 = self.ctcf_dict[chrom]
+        X2 = X2[max(0, atac_start_ind) : atac_start_ind + input_window]
+        X2 = torch.tensor(X2.toarray().astype(np.float32).T)
+
+        if start < 0:
+            desired_shape = (1, 80200)
+            # Determine the number of zeros to add on the left side
+            num_zeros = desired_shape[1] - X1.shape[1]
+            # Pad the tensor with zeros on the left side
+            X1 = torch.cat([torch.zeros((X1.shape[0], num_zeros)), X1], dim=1)
+            X2 = torch.cat([torch.zeros((X2.shape[0], num_zeros)), X2], dim=1)
+
+            desired_shape = (Z1.shape[0], 8020)
+            num_zeros = desired_shape[1] - Z1.shape[1]
+            Z1 = torch.cat([torch.zeros((Z1.shape[0], num_zeros)), Z1], dim=1)
+
+        Z1 = cpu_batch_corcoeff_vstripe(Z1)
+
+        X1_rev = torch.empty_like(X1).copy_(X1)
+        X1_rev = torch.flip(X1_rev, [1])
+        X2_rev = torch.empty_like(X2).copy_(X2)
+        X2_rev = torch.flip(X2_rev, [1])
+        Z1_rev = torch.empty_like(Z1).copy_(Z1)
+        Z1_rev = torch.flip(Z1_rev, [1])
+
+        return Z1, Z1_rev, X1, X1_rev, X2, X2_rev
+
+
+def test(test_loader, model, device):
+    y_hat_list = []
+    model.eval()
+    for Z2, Z2_rev, X1, X1_rev, X2, X2_rev in test_loader:
+        # left interactions
+        X1 = X1.to(device)
+        X2 = X2.to(device)
+        X = torch.cat((X1, X2), axis = 1)
+        Z2 = Z2.to(device)
+        y_hat = model(Z2, X)
+
+        # right interactions
+        X1_rev = X1_rev.to(device)
+        X2_rev = X2_rev.to(device)
+        X_rev = torch.cat((X1_rev, X2_rev), axis = 1)
+        Z2_rev = Z2_rev.to(device)
+        y_hat_rev = model(Z2_rev, X_rev)
+
+        y_hat = torch.cat((y_hat, torch.flip(y_hat_rev, [1])), 1)
+        y_hat_list.append(y_hat.detach().cpu())
+    return y_hat_list
+
+
+test.__test__ = False   # ChromaFold's name; not a pytest test
+
+
+def chromafold_inference(pbulk_dict, scatac_dict, ctcf_dict, chrom, model_path, offset):
+    """inference.py's main() for one chromosome of hg38, given its loaded inputs
+    (load_atac_eval and load_ctcf_motif)."""
+    from gatac_chromafold._model import branch_cov, branch_pbulk, trunk
+    from gatac_chromafold.predict import ENDS
+
+    device = torch.device("cuda")
+    input_size = 4010000
+    test_step = 1e04
+    start_dict = {c: 0 for c in ENDS["hg38"]}
+    end_dict = ENDS["hg38"]
+    effective_genome_size = 2913022398
+    normalized_pbulk_dict = normalize_bulk_dict(pbulk_dict, effective_genome_size)
+    test_dataset = test_Dataset(
+        input_size, normalized_pbulk_dict, scatac_dict, ctcf_dict,
+        *get_starts(chrom_list=[chrom[3:]], start_dict=start_dict, end_dict=end_dict,
+                    chrom_start_offset=offset, chrom_end_offset=5000000, multi_ct=False,
+                    ct_list=["ct"], step=test_step),
+        transform=normalize,
+    )
+    test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=64, shuffle=False, num_workers=0)
+    mod_branch_pbulk = nn.DataParallel(branch_pbulk(), device_ids=[0])
+    mod_branch_cov = nn.DataParallel(branch_cov(), device_ids=[0])
+    model = nn.DataParallel(trunk(mod_branch_pbulk, mod_branch_cov), device_ids=[0])
+    model.to(device)
+    model.load_state_dict(torch.load(model_path, weights_only=True))
+    model.eval()
+    with torch.no_grad():
+        y_hat_list = test(test_loader, model, device)
+    return np.concatenate([x.numpy() for x in y_hat_list], axis=0)
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +583,38 @@ def test_chromafold_inputs(rerun_reference=False):
         np.add.at(expected, d.index.to_numpy(), d.to_numpy())
         bulk_diff += int((theirs != expected).sum())
 
+    # --- predictions on PREDICT_CHROM ------------------------------------------
+    # (a) ChromaFold's inference.py code on ChromaFold's preprocessing, and predict()
+    #     reading that preprocessing from ChromaFold's file layout: the same inputs
+    # (b) predict() on GATAC's inputs, against (a): end to end
+    from gatac_chromafold.data import checkpoint, ctcf_track
+
+    layout = _path("chromafold_layout")
+    os.makedirs(os.path.join(layout, "atac"), exist_ok=True)
+    with open(os.path.join(layout, "atac", "cf_tile_pbulk_50bp_dict.p"), "wb") as f:
+        pickle.dump({c: ref["pbulk"][c].astype(np.float64)[:, None] for c in VALID_CHROM}, f)
+    with open(os.path.join(layout, "atac", "cf_tile_500bp_dict.p"), "wb") as f:
+        pickle.dump({c: ref["tiles"][c].astype(np.float64) for c in VALID_CHROM}, f)
+    np.save(os.path.join(layout, "atac", "cf_tile_500bp_barcode.npy"), np.asarray(cells))
+    pd.DataFrame(mask.toarray().astype(np.int64), columns=cells).to_csv(
+        os.path.join(layout, "atac", "cf_metacell_mask.csv"))
+
+    chrom, offset = PREDICT_CHROM, -2_000_000
+    gcf.predict(inputs, chroms=[chrom], offset=offset)      # downloads, CUDA start-up
+    pred_same, pred_time = _timed(lambda: gcf.predict(
+        data_path=layout, cell_type="cf", chroms=[chrom], offset=offset))
+    pred_gatac = gcf.predict(inputs, chroms=[chrom], offset=offset)
+    track = ctcf_track("hg38")
+    y_ref, ref_time = _timed(lambda: chromafold_inference(
+        {c: sp.csr_matrix(ref["pbulk"][c].astype(np.float64)[:, None]) for c in VALID_CHROM},
+        get_metacell_profile({chrom: ref["tiles"][chrom].astype(np.float64)}, mask.toarray()),
+        {chrom: sp.csc_matrix(track[chrom].astype(np.float64)[None, :]).T},   # load_ctcf_motif
+        chrom, checkpoint("CTCFmotif"), offset))
+    same_diff = float(np.abs(pred_same.stripes[chrom] - y_ref).max())
+    y_gatac = pred_gatac.stripes[chrom]
+    e2e_r = float(np.corrcoef(y_gatac.ravel(), y_ref.ravel())[0, 1])
+    e2e_diff = np.abs(y_gatac - y_ref)
+
     n_ins = 2 * len(frag)
     log = [
         f"Cells:\t{len(cells):,} (TSS enrichment >= 4, >= 1,000 fragments), {len(frag):,} fragments",
@@ -382,6 +633,11 @@ def test_chromafold_inputs(rerun_reference=False):
         f"{prof_diff:,} of {prof_nnz:,} differ, from the moved insertions",
         f"50 bp track:\t{bulk_diff} bins differ beyond the "
         f"{int((frag['end'] % 50 == 0).sum()):,} insertions at end % 50 == 0",
+        f"Predictions ({chrom}, {len(y_ref):,} windows):\tGATAC predict {pred_time:.2f}s, "
+        f"ChromaFold inference {ref_time:.2f}s ({ref_time / pred_time:.1f}x)",
+        f"  same inputs:\tmax |difference| {same_diff:.2e}",
+        f"  GATAC inputs vs ChromaFold's:\tr = {e2e_r:.5f}, |difference| mean {e2e_diff.mean():.4f}, "
+        f"max {e2e_diff.max():.3f} (prediction sd {y_ref.std():.3f})",
     ]
     with open(_path("chromafold_inputs.log"), "w") as f:
         for line in log:
@@ -391,6 +647,10 @@ def test_chromafold_inputs(rerun_reference=False):
     assert tile_diff == 0, f"{tile_diff} tile entries differ"
     assert agg_diff == 0, f"{agg_diff} metacell profile entries differ"
     assert bulk_diff == 0, f"{bulk_diff} 50 bp bins differ"
+    # float32 rounding: GPU against CPU co-accessibility, batching (measured 2.3e-4)
+    assert same_diff < 1e-3, f"predictions on the same inputs differ by {same_diff}"
+    # the moved insertions (measured r = 0.99985)
+    assert e2e_r > 0.999, f"end-to-end prediction correlation {e2e_r}"
 
 
 if __name__ == "__main__":
