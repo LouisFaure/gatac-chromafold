@@ -1,0 +1,52 @@
+[project]
+name = "gatac-chromafold"
+version = "0.1.0"
+description = "ChromaFold contact-map prediction from GATAC fragments and AnnData"
+readme = "README.md"
+license = { text = "BSD-3-Clause" }
+requires-python = ">=3.12"
+dependencies = [
+    "gatac>=0.1",
+]
+
+[project.optional-dependencies]
+cuda12 = ["gatac[cuda12]"]
+cuda13 = ["gatac[cuda13]"]
+
+# gatac.chromafold imports gatac_chromafold
+[project.entry-points."gatac.ext"]
+chromafold = "gatac_chromafold"
+
+# `gatac chromafold ...`
+[project.entry-points."gatac.cli"]
+chromafold = "gatac_chromafold.cli:register"
+
+[dependency-groups]
+test = [
+    "pytest>=8",
+    "scikit-learn",  # ChromaFold's own metacell code, the reference of the tests
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cuda12" },
+        { extra = "cuda13" },
+    ],
+]
+
+[tool.uv.sources]
+# The GATAC branch with pp.metacells / aggregate / insertion_tracks (feat/metacells);
+# switch to the released package once it is merged.
+gatac = { path = "/scratch/soldatr/faurel1/tmp/gatac_metacells/GATAC", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib", "--strict-markers", "-m", "not reproducibility"]
+markers = [
+    "reproducibility: downloads the PBMC 5k fragments and compares with ChromaFold's code (minutes); run with -m reproducibility",
+]
