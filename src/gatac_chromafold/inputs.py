@@ -54,7 +54,8 @@ PARAMS = {
     "bin_size": 50,
 }
 
-GENOMES = {"hg38": ga.pp.HG38, "hg19": ga.pp.HG19, "mm10": ga.pp.MM10, "mm39": ga.pp.MM39}
+#: Genomes whose chromosome sizes gatac.pp has (gatac.pp.HG38, ...)
+GENOMES = ("hg38", "hg19", "mm10", "mm39")
 
 
 def chromosomes(chrom_sizes: Mapping[str, int]) -> dict[str, int]:
@@ -200,7 +201,11 @@ def prepare(
     >>> inputs.write("chromafold_data", "tcell")
     """
     p = {**PARAMS, **(params or {})}
-    sizes = chromosomes(GENOMES[genome] if isinstance(genome, str) else genome)
+    if isinstance(genome, str):
+        if genome not in GENOMES:
+            raise ValueError(f"unknown genome {genome!r}; one of {list(GENOMES)}, or chromosome sizes")
+        genome = getattr(ga.pp, genome.upper())
+    sizes = chromosomes(genome)
     if not sizes:
         raise ValueError("none of chr1-22 and chrX are in the genome")
 
