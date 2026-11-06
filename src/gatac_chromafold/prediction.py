@@ -257,22 +257,29 @@ def predict(
     scale = sum(v.sum() for v in bulk.values()) * 150 / EFFECTIVE_GENOME_SIZE[genome[:2]]
     n50, n500 = INPUT_SIZE // PBULK_RES, INPUT_SIZE // SC_RES
     stripes, centers = {}, {}
-    with torch.no_grad():
-        for c in chroms:
-            # utils.normalize: log(x + 1) of the float32 normalised track
-            x1 = torch.log(torch.as_tensor((bulk[c] / scale).astype(np.float32), device=device) + 1)
-            x2 = torch.as_tensor(np.asarray(ctcf[c], dtype=np.float32), device=device)
-            z = torch.as_tensor(profiles[c].toarray(), dtype=torch.float32, device=device)
-            starts = np.arange(offset, ENDS[genome][c] - 5_000_000, RESOLUTION).astype(int)
-            out = []
-            for b in range(0, len(starts), batch_size):
-                s = starts[b:b + batch_size]
-                X = torch.stack([_windows(x1, s, PBULK_RES, n50), _windows(x2, s, PBULK_RES, n50)], dim=1)
-                Z = _jaccard(_windows(z, s, SC_RES, n500))
-                y = net(Z, X)
-                y_rev = net(torch.flip(Z, [2]), torch.flip(X, [2]))
-                out.append(torch.cat([y, torch.flip(y_rev, [1])], 1).cpu().numpy())
-            stripes[c] = np.concatenate(out) if out else np.zeros((0, 2 * PRED_LEN), np.float32)
-            centers[c] = (starts + INPUT_SIZE // 2 - RESOLUTION // 2) // RESOLUTION
-            logger.info(f"{c}: {len(starts):,} windows")
+    # Full float32: cuDNN's TF32 convolutions, its default on Ampere and later GPUs, move
+    # the predictions by up to ~7e-3 (sd 0.5), for no speed gain here
+    tf32 = torch.backends.cudnn.allow_tf32
+    torch.backends.cudnn.allow_tf32 = False
+    try:
+        with torch.no_grad():
+            for c in chroms:
+                # utils.normalize: log(x + 1) of the float32 normalised track
+                x1 = torch.log(torch.as_tensor((bulk[c] / scale).astype(np.float32), device=device) + 1)
+                x2 = torch.as_tensor(np.asarray(ctcf[c], dtype=np.float32), device=device)
+                z = torch.as_tensor(profiles[c].toarray(), dtype=torch.float32, device=device)
+                starts = np.arange(offset, ENDS[genome][c] - 5_000_000, RESOLUTION).astype(int)
+                out = []
+                for b in range(0, len(starts), batch_size):
+                    s = starts[b:b + batch_size]
+                    X = torch.stack([_windows(x1, s, PBULK_RES, n50), _windows(x2, s, PBULK_RES, n50)], dim=1)
+                    Z = _jaccard(_windows(z, s, SC_RES, n500))
+                    y = net(Z, X)
+                    y_rev = net(torch.flip(Z, [2]), torch.flip(X, [2]))
+                    out.append(torch.cat([y, torch.flip(y_rev, [1])], 1).cpu().numpy())
+                stripes[c] = np.concatenate(out) if out else np.zeros((0, 2 * PRED_LEN), np.float32)
+                centers[c] = (starts + INPUT_SIZE // 2 - RESOLUTION // 2) // RESOLUTION
+                logger.info(f"{c}: {len(starts):,} windows")
+    finally:
+        torch.backends.cudnn.allow_tf32 = tf32
     return ContactPrediction(stripes=stripes, centers=centers, chrom_sizes={c: int(lengths[c]) for c in chroms})

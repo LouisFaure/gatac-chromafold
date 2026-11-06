@@ -11,12 +11,13 @@ ChromaFold {Gao et al. 2024, Nat Commun 15:9432} takes, per cell type:
 
 Its preprocessing (preprocessing_pipeline/ in the ChromaFold repository) runs
 ArchR for the cell filters and the LSI, then pandas for the counts.
-:func:`prepare` builds the same inputs with GATAC on the GPU, and
+:func:`prepare` builds the same inputs on the GPU, with GATAC's fragment files,
+iterative LSI and this package's counts and metacells, and
 :meth:`ChromaFoldInputs.write` writes them in ChromaFold's file layout, which
 its ``inference.py`` reads.
 
-Insertions are counted as GATAC counts them: a fragment's second insertion is
-at ``end - 1``, where ChromaFold's pandas code puts it at ``end``. That moves
+Insertions are counted as GATAC and SnapATAC2 place them: a fragment's second
+insertion is at ``end - 1``, where ChromaFold's pandas code puts it at ``end``. That moves
 the second insertion of the fragments whose ``end`` is a multiple of the bin
 size into the previous bin (0.1 % of insertions at 500 bp, 1 % at 50 bp);
 everything else is identical (tests/reproducibility).
@@ -36,6 +37,10 @@ import pandas as pd
 import scipy.sparse as sp
 
 import gatac as ga
+
+from ._counts import InsertionTracks, insertion_tiles, insertion_tracks
+from ._metacells import metacells as _metacells
+from ._metacells import profiles as _profiles
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +82,7 @@ class ChromaFoldInputs:
         ``uns["chromafold_metacells"]``.
     metacells : AnnData
         Metacells × 500 bp tiles, the sums of their cells' counts.
-    pseudobulk : gatac.pp.InsertionTracks
+    pseudobulk : InsertionTracks
         The 50 bp insertion track of all the cells (group ``"all"``).
     chrom_sizes : dict
         The chromosomes used, chr1-22 and chrX.
@@ -85,7 +90,7 @@ class ChromaFoldInputs:
 
     tiles: ad.AnnData
     metacells: ad.AnnData
-    pseudobulk: "ga.pp.InsertionTracks"
+    pseudobulk: InsertionTracks
     chrom_sizes: dict[str, int]
 
     def __repr__(self) -> str:
@@ -174,7 +179,10 @@ def prepare(
         ``"hg38"``, ``"hg19"``, ``"mm10"``, ``"mm39"``, or chromosome sizes.
         Only chr1-22 and chrX are used, as ChromaFold does.
     cells
-        The cells to use, as names or an AnnData (its ``obs_names``). By
+        The cells to use, as names or an AnnData (its ``obs_names``), in
+        ChromaFold's order whatever the order given: sorted, as its
+        ``np.unique`` of the barcodes sorts them, which the metacells depend
+        on. Cells without a fragment on chr1-22 and chrX are left out. By
         default, the cells passing ChromaFold's filters, TSS enrichment of at
         least ``params["min_tsse"]`` and at least ``params["min_fragments"]``
         unique fragments, read from ``metrics``
@@ -225,10 +233,7 @@ def prepare(
     if len(cells) == 0:
         raise ValueError("no cells")
 
-    tiles = ga.pp.make_tile_matrix(
-        fragments, chrom_sizes=sizes, tile_size=p["tile_size"], min_fragments_per_cell=1,
-        exclude_chroms=None, metrics=pd.DataFrame({"barcode": cells}), count_strategy="insertion",
-    )
+    tiles = insertion_tiles(fragments, sizes, cells, tile_size=p["tile_size"])
     if embedding is not None:
         missing = tiles.obs_names.difference(embedding.index)
         if len(missing):
@@ -237,13 +242,10 @@ def prepare(
     else:
         use_rep = "X_iterative_lsi"
         ga.dr.iterative_lsi(tiles, **p["lsi"])
-    ga.pp.metacells(tiles, use_rep=use_rep, n_neighbors=p["n_neighbors"],
-                    max_overlap=p["max_overlap"], random_state=p["random_state"],
-                    key_added="chromafold_metacells")
-    metacells = ga.pp.aggregate(tiles, by="chromafold_metacells")
-    pseudobulk = ga.pp.insertion_tracks(
-        fragments, sizes, bin_size=p["bin_size"], exclude_chroms=None,
-        groups=pd.Series("all", index=tiles.obs_names),
-    )
+    _metacells(tiles, use_rep=use_rep, n_neighbors=p["n_neighbors"], max_overlap=p["max_overlap"],
+               random_state=p["random_state"], key_added="chromafold_metacells")
+    metacells = _profiles(tiles, "chromafold_metacells")
+    pseudobulk = insertion_tracks(fragments, sizes, bin_size=p["bin_size"],
+                                  groups=pd.Series("all", index=tiles.obs_names))
     tiles.uns["chromafold"] = {"params": p, "use_rep": use_rep}
     return ChromaFoldInputs(tiles=tiles, metacells=metacells, pseudobulk=pseudobulk, chrom_sizes=sizes)

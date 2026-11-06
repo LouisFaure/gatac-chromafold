@@ -13,13 +13,13 @@ _LAZY = {
     "ChromaFoldInputs": "inputs",
     "chromosomes": "inputs",
     "prepare": "inputs",
-    "ContactPrediction": "predict",
-    "predict": "predict",
+    "ContactPrediction": "prediction",
+    "predict": "prediction",
 }
 
 if TYPE_CHECKING:
     from .inputs import PARAMS, ChromaFoldInputs, chromosomes, prepare  # noqa: F401
-    from .predict import ContactPrediction, predict  # noqa: F401
+    from .prediction import ContactPrediction, predict  # noqa: F401
 
 __all__ = list(_LAZY)
 

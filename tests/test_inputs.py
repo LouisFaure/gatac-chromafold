@@ -64,6 +64,17 @@ def test_prepare_builds_chromafolds_inputs(inputs, celltype):
     f = celltype["fragments"]
     n_ins = 2 * int((f.chrom != "chrM").sum())
     assert t.X.sum() == n_ins
+    # each end of each fragment in its 500 bp tile, both ends in one tile counting twice
+    s = f[f.chrom != "chrM"]
+    ends = pd.DataFrame({"cell": np.r_[s.barcode, s.barcode], "chrom": np.r_[s.chrom, s.chrom],
+                         "start": np.r_[s.start, s.end - 1] // 500 * 500})
+    n = ends.groupby(["cell", "chrom", "start"]).size()
+    col = pd.Series(np.arange(t.n_vars), index=pd.MultiIndex.from_arrays([t.var["chrom"], t.var["start"]]))
+    want = sp.csr_matrix((n.to_numpy(), (t.obs_names.get_indexer(n.index.get_level_values(0)),
+                                         col.loc[list(zip(n.index.get_level_values(1), n.index.get_level_values(2)))])),
+                         shape=t.shape)
+    assert (t.X != want).nnz == 0
+    assert np.array_equal(t.obs["n_unique"], s.groupby("barcode").size().loc[t.obs_names])
     assert inputs.library_size == n_ins
     for c in inputs.chrom_sizes:
         tr = inputs.pseudobulk.track("all", c)
@@ -114,6 +125,8 @@ def test_extension_and_command(celltype, tmp_path):
     """Reached as gatac.chromafold, and `gatac chromafold prepare` writes the inputs."""
     assert "chromafold" in ga.extensions()
     assert ga.chromafold.prepare is gcf.prepare
+    # the lazy names stay the functions once their modules are imported
+    assert callable(gcf.predict) and callable(gcf.predict) and ga.chromafold.predict is gcf.predict
     h5ad = tmp_path / "cells.h5ad"
     celltype["cells"].write_h5ad(h5ad)
     gatac = Path(sys.executable).parent / "gatac"

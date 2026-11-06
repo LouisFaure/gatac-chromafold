@@ -18,12 +18,11 @@ The test starts from the 10x PBMC 5k fragments: ``gatac.io.make_parquet``,
 1. keeps ChromaFold's cells, TSS enrichment >= 4 and >= 1,000 fragments
    (ChromaFold applies them with ArchR's ``createArrowFiles``, whose TSS
    enrichment is computed differently, so the cells are not ArchR's);
-2. counts insertions in 500 bp tiles on chr1-22 and chrX
-   (``pp.make_tile_matrix(count_strategy="insertion")``);
+2. counts insertions in 500 bp tiles on chr1-22 and chrX (``_counts.insertion_tiles``);
 3. computes the iterative LSI with ChromaFold's ``addIterativeLSI``
    parameters (``dr.iterative_lsi``);
-4. builds the inputs: ``pp.metacells``, ``pp.aggregate`` and
-   ``pp.insertion_tracks``.
+4. builds the inputs: ``_metacells.metacells``, ``_metacells.profiles`` and
+   ``_counts.insertion_tracks``.
 
 ChromaFold's functions get the same cells, fragments and LSI. They are copied
 below from commit 1c5dd9b (2024-10-04), with the file reads and writes
@@ -69,7 +68,9 @@ from sklearn.neighbors import NearestNeighbors
 
 import gatac as ga
 import gatac_chromafold as gcf
-from gatac.io.fragments import FragmentFile
+from gatac.io import FragmentFile
+from gatac_chromafold._counts import insertion_tiles, insertion_tracks
+from gatac_chromafold._metacells import metacells, profiles
 
 CHROMAFOLD_COMMIT = "1c5dd9b07d851d196c31c26024d90c0335f1bd75"
 VALID_CHROM = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
@@ -360,7 +361,7 @@ def chromafold_inference(pbulk_dict, scatac_dict, ctcf_dict, chrom, model_path, 
     """inference.py's main() for one chromosome of hg38, given its loaded inputs
     (load_atac_eval and load_ctcf_motif)."""
     from gatac_chromafold._model import branch_cov, branch_pbulk, trunk
-    from gatac_chromafold.predict import ENDS
+    from gatac_chromafold.prediction import ENDS
 
     device = torch.device("cuda")
     input_size = 4010000
@@ -494,13 +495,11 @@ def test_chromafold_inputs(rerun_reference=False):
     # the steps of prepare that ChromaFold's code does, timed on their own
     t = {}
     sizes = inputs.chrom_sizes
-    _, t["metacells"] = _timed(lambda: ga.pp.metacells(tiles, use_rep="X_iterative_lsi", key_added="timing"))
-    _, t["tiles"] = _timed(lambda: ga.pp.make_tile_matrix(
-        parquet, chrom_sizes=sizes, tile_size=500, min_fragments_per_cell=1, exclude_chroms=None,
-        metrics=pd.DataFrame({"barcode": cells}), count_strategy="insertion"))
-    _, t["profiles"] = _timed(lambda: ga.pp.aggregate(tiles, by="chromafold_metacells"))
-    _, t["track"] = _timed(lambda: ga.pp.insertion_tracks(
-        parquet, sizes, bin_size=50, exclude_chroms=None, groups=pd.Series("all", index=cells)))
+    _, t["metacells"] = _timed(lambda: metacells(tiles, use_rep="X_iterative_lsi", key_added="timing"))
+    _, t["tiles"] = _timed(lambda: insertion_tiles(parquet, sizes, cells, tile_size=500))
+    _, t["profiles"] = _timed(lambda: profiles(tiles, "chromafold_metacells"))
+    _, t["track"] = _timed(lambda: insertion_tracks(
+        parquet, sizes, bin_size=50, groups=pd.Series("all", index=cells)))
     gatac_time = sum(t.values())
 
     # --- ChromaFold, given the same cells, fragments and LSI -------------------
@@ -558,12 +557,12 @@ def test_chromafold_inputs(rerun_reference=False):
             shape=g.shape)
         tile_diff += (theirs != expected).nnz
 
-    # metacell profiles: pp.aggregate of ChromaFold's own tiles must give its profiles;
+    # metacell profiles: profiles() of ChromaFold's own tiles must give its profiles;
     # end to end, they differ by the moved insertions
     cf_adata = ad.AnnData(sp.hstack([cf_tiles[c] for c in VALID_CHROM]).tocsr(),
                           obs=pd.DataFrame(index=cells))
     cf_adata.obsm["metacells"] = M
-    cf_aggregate = ga.pp.aggregate(cf_adata, by="metacells")
+    cf_aggregate = profiles(cf_adata, "metacells")
     edges = np.cumsum([0] + [cf_tiles[c].shape[1] for c in VALID_CHROM])
     agg_diff, prof_diff, prof_nnz = 0, 0, 0
     for i, c in enumerate(VALID_CHROM):
@@ -605,6 +604,9 @@ def test_chromafold_inputs(rerun_reference=False):
         data_path=layout, cell_type="cf", chroms=[chrom], offset=offset))
     pred_gatac = gcf.predict(inputs, chroms=[chrom], offset=offset)
     track = ctcf_track("hg38")
+    # ChromaFold's code in full float32, as predict() runs: cuDNN's TF32 convolutions,
+    # its default on Ampere and later GPUs, move its predictions by up to ~7e-3
+    torch.backends.cudnn.allow_tf32 = False
     y_ref, ref_time = _timed(lambda: chromafold_inference(
         {c: sp.csr_matrix(ref["pbulk"][c].astype(np.float64)[:, None]) for c in VALID_CHROM},
         get_metacell_profile({chrom: ref["tiles"][chrom].astype(np.float64)}, mask.toarray()),
@@ -647,8 +649,8 @@ def test_chromafold_inputs(rerun_reference=False):
     assert tile_diff == 0, f"{tile_diff} tile entries differ"
     assert agg_diff == 0, f"{agg_diff} metacell profile entries differ"
     assert bulk_diff == 0, f"{bulk_diff} 50 bp bins differ"
-    # float32 rounding: GPU against CPU co-accessibility, batching (measured 2.3e-4)
-    assert same_diff < 1e-3, f"predictions on the same inputs differ by {same_diff}"
+    # float32 rounding: GPU against CPU co-accessibility, batching (measured 2.9e-6 on an A100)
+    assert same_diff < 1e-4, f"predictions on the same inputs differ by {same_diff}"
     # the moved insertions (measured r = 0.99985)
     assert e2e_r > 0.999, f"end-to-end prediction correlation {e2e_r}"
 

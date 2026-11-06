@@ -69,7 +69,7 @@ def _predict(args) -> None:
 
     import numpy as np
 
-    from .predict import predict
+    from .prediction import predict
 
     try:
         pred = predict(data_path=args.data, cell_type=args.cell_type, genome=args.genome,

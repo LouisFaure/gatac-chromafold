@@ -7,7 +7,7 @@ import scipy.sparse as sp
 
 torch = pytest.importorskip("torch")
 
-from gatac_chromafold.predict import ContactPrediction, _jaccard, _windows  # noqa: E402
+from gatac_chromafold.prediction import ContactPrediction, _jaccard, _windows  # noqa: E402
 
 
 def cpu_jaccard_vstripe(x):
