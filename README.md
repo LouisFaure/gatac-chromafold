@@ -16,7 +16,7 @@ inputs from a GATAC fragment file on the GPU, without ArchR or R:
 pip install "gatac-chromafold[rapids-cu12,model]"   # or rapids-cu13, matching nvidia-smi's CUDA version
 ```
 
-It needs GATAC 0.1.0 or later, and uses only its public API.
+It needs GATAC 0.2.0 or later, and uses only its public API.
 
 ```python
 import gatac as ga

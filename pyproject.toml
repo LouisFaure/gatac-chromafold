@@ -6,7 +6,7 @@ readme = "README.md"
 license = { text = "BSD-3-Clause" }
 requires-python = ">=3.13"
 dependencies = [
-    "gatac>=0.1.0",  # public API only: io.FragmentFile, dr.iterative_lsi, pp genomes
+    "gatac>=0.2.0",  # public API only: io.FragmentFile, dr.iterative_lsi, pp genomes
     "numba>=0.60",
 ]
 
