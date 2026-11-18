@@ -13,7 +13,7 @@ inputs from a GATAC fragment file on the GPU, without ArchR or R:
 | 50 bp track of all cells | pandas | the same, in 50 bp bins |
 
 ```bash
-pip install "gatac-chromafold[rapids-cu12,model]"   # or rapids-cu13, matching nvidia-smi's CUDA version
+pip install "gatac-chromafold[rapids-cu12]"   # or rapids-cu13, matching nvidia-smi's CUDA version
 ```
 
 It needs GATAC 0.2.0 or later, and uses only its public API.
@@ -33,9 +33,8 @@ gatac chromafold prepare tcell.parquet -o chromafold_data -c tcell --metrics tce
 gatac chromafold predict chromafold_data -c tcell -o predictions --chroms chr19
 ```
 
-`predict` (needs the `model` extra: `pip install "gatac-chromafold[model]"`) runs
-the published ChromaFold model (`_model.py`, MIT, copied from ChromaFold) on
-the GPU, with ChromaFold's windowing, normalisation and Jaccard
+`predict` runs the published ChromaFold model (`_model.py`, MIT, copied from
+ChromaFold) on the GPU, with ChromaFold's windowing, normalisation and Jaccard
 co-accessibility computed in batches instead of its per-window CPU
 dataloader. The checkpoint (GitHub) and ChromaFold's CTCF motif track
 (Google Drive; hg38, hg19, mm10) are downloaded on first use into
@@ -54,9 +53,9 @@ Otherwise the inputs are ChromaFold's own: see `tests/reproducibility`.
 ## Tests
 
 ```bash
-uv sync --extra rapids-cu12 --extra model
-uv run --extra rapids-cu12 --extra model pytest     # unit tests, synthetic data, seconds
-uv run --extra rapids-cu12 --extra model pytest -m reproducibility tests/reproducibility
+uv sync --extra rapids-cu12
+uv run --extra rapids-cu12 pytest     # unit tests, synthetic data, seconds
+uv run --extra rapids-cu12 pytest -m reproducibility tests/reproducibility
 # vs ChromaFold's code on PBMC 5k: inputs and chr19 predictions (downloads ~1.3 GB)
 ```
 

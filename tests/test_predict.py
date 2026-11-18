@@ -4,10 +4,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import scipy.sparse as sp
+import torch
 
-torch = pytest.importorskip("torch")
-
-from gatac_chromafold.prediction import ContactPrediction, _jaccard, _windows  # noqa: E402
+from gatac_chromafold.prediction import ContactPrediction, _jaccard, _windows
 
 
 def cpu_jaccard_vstripe(x):

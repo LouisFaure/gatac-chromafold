@@ -8,14 +8,11 @@ requires-python = ">=3.13"
 dependencies = [
     "gatac>=0.2.0",  # public API only: io.FragmentFile, dr.iterative_lsi, pp genomes
     "numba>=0.60",
+    "torch>=2.4",  # predict()
+    "gdown>=5",  # ChromaFold's CTCF motif tracks are on Google Drive
 ]
 
 [project.optional-dependencies]
-# running the model: predict()
-model = [
-    "torch>=2.4",
-    "gdown>=5",  # ChromaFold's CTCF motif tracks are on Google Drive
-]
 # RAPIDS, through GATAC's extras: the one matching the CUDA version nvidia-smi reports
 rapids-cu12 = ["gatac[rapids-cu12]"]
 rapids-cu13 = ["gatac[rapids-cu13]"]
